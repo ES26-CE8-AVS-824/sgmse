@@ -107,13 +107,14 @@ def print_metrics(x, y, x_hat_list, labels, sr=16000):
         print(f'{labels[i]}: {_pesq:.2f}, ESTOI: {_estoi:.2f}, SI-SDR: {_si_sdr:.2f}')
 
 def mean_std(data):
+    data = np.array(data, dtype=np.float32)
     data = data[~np.isnan(data)]
     mean = np.mean(data)
     std = np.std(data)
     return mean, std
 
 def print_mean_std(data, decimal=2):
-    data = np.array(data)
+    data = np.array(data, dtype=np.float32)
     data = data[~np.isnan(data)]
     mean = np.mean(data)
     std = np.std(data)

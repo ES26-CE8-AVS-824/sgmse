@@ -28,10 +28,16 @@ if __name__ == '__main__':
     parser.add_argument("--N", type=int, default=30, help="Number of reverse steps")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use for inference")
     parser.add_argument("--t_eps", type=float, default=0.03, help="The minimum process time (0.03 by default)")
+    parser.add_argument("--trusted_ckpt", action="store_true", help="Whether to trust the checkpoint path provided (for loading from private checkpoints)")
     args = parser.parse_args()
 
+    print(f"Using device: {args.device}")
+    if args.device == "cuda" and torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+
     # Load score model 
-    model = ScoreModel.load_from_checkpoint(args.ckpt, map_location=args.device)
+    model = ScoreModel.load_from_checkpoint(args.ckpt, map_location=args.device, weights_only=not args.trusted_ckpt)
+    model = model.to(args.device)
     model.t_eps = args.t_eps
     model.eval()
 
@@ -86,7 +92,7 @@ if __name__ == '__main__':
                 raise ValueError(f"Sampler type {args.sampler_type} not supported")
         elif model.sde.__class__.__name__ == 'SBVESDE':
             sampler_type = 'ode' if args.sampler_type == 'pc' else args.sampler_type
-            sampler = model.get_sb_sampler(sde=model.sde, y=Y.cuda(), sampler_type=sampler_type)
+            sampler = model.get_sb_sampler(sde=model.sde, y=Y.to(args.device), sampler_type=sampler_type)
         else:
             raise ValueError(f"SDE {model.sde.__class__.__name__} not supported")
             

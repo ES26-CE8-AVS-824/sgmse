@@ -333,3 +333,7 @@ $RECYCLE.BIN/
 /lightning_logs
 /logs
 /jobs
+
+# Checkpoints and data
+ckpts/
+data/
