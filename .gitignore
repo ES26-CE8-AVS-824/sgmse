@@ -337,3 +337,6 @@ $RECYCLE.BIN/
 # Checkpoints and data
 ckpts/
 data/
+
+# AILAB venv
+sgmse_venv/*
