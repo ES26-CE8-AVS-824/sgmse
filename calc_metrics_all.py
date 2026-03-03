@@ -14,35 +14,28 @@ from jiwer import wer
 from pesq import pesq
 from pystoi import stoi
 
-
-
-
 from sgmse.util.other import energy_ratios, mean_std
 
 
 def compute_audio_metrics(original, adversarial, purified, sr):
-    """Compute all metrics for the three signals with nested structure."""
-    metrics = {
-        "pesq": {},
-        "estoi": {}
-    }
-
-    # Resample to 16k for PESQ
+    """Compute all metrics comparing original/adversarial/purified signals."""
     original_16k = librosa.resample(original, orig_sr=sr, target_sr=16000) if sr != 16000 else original
     adversarial_16k = librosa.resample(adversarial, orig_sr=sr, target_sr=16000) if sr != 16000 else adversarial
     purified_16k = librosa.resample(purified, orig_sr=sr, target_sr=16000) if sr != 16000 else purified
 
-    # --- PESQ ---
-    metrics["pesq"]["og-vs-adv"] = pesq(16000, original_16k, adversarial_16k, 'wb')
-    metrics["pesq"]["og-vs-prf"] = pesq(16000, original_16k, purified_16k, 'wb')
-    metrics["pesq"]["adv-vs-prf"] = pesq(16000, adversarial_16k, purified_16k, 'wb')
+    metrics = {
+        "pesq": {
+            "og-vs-adv": pesq(16000, original_16k, adversarial_16k, 'wb'),
+            "og-vs-prf": pesq(16000, original_16k, purified_16k, 'wb'),
+            "adv-vs-prf": pesq(16000, adversarial_16k, purified_16k, 'wb'),
+        },
+        "estoi": {
+            "og-vs-adv": stoi(original, adversarial, sr, extended=True),
+            "og-vs-prf": stoi(original, purified, sr, extended=True),
+            "adv-vs-prf": stoi(adversarial, purified, sr, extended=True),
+        },
+    }
 
-    # --- ESTOI ---
-    metrics["estoi"]["og-vs-adv"] = stoi(original, adversarial, sr, extended=True)
-    metrics["estoi"]["og-vs-prf"] = stoi(original, purified, sr, extended=True)
-    metrics["estoi"]["adv-vs-prf"] = stoi(adversarial, purified, sr, extended=True)
-
-    # --- SI-SDR / SIR / SAR ---
     n = adversarial - original
     si_sdr, si_sir, si_sar = energy_ratios(purified, original, n)
     metrics["si-sdr"] = si_sdr
@@ -54,169 +47,253 @@ def compute_audio_metrics(original, adversarial, purified, sr):
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument("--original_dir", type=str, required=True, help='Directory containing the original data')
-    parser.add_argument("--adversarial_dir", type=str, required=True, help='Directory containing the adversarial data')
-    parser.add_argument("--purified_dir", type=str, required=True, help='Directory containing the purified data')
+    parser.add_argument("--original_dir", type=str, required=True,
+                        help="Directory containing the original (clean) audio")
+    parser.add_argument("--adversarial_dir", type=str, required=True,
+                        help="Directory containing the adversarial audio")
+    parser.add_argument("--purified_parent_dir", type=str, required=True,
+                        help="Parent directory whose subdirectories are one purifier each "
+                             "(e.g. purified/sgmse, purified/mambattention)")
     args = parser.parse_args()
 
-    # ======================================================
-    # Compute audio quality metrics
-    # ======================================================
+    # ------------------------------------------------------------------
+    # Discover purifier subdirectories
+    # ------------------------------------------------------------------
 
-    # Prepare storage
-    data = {"filename": []}
-    # Initialize nested dictionaries in the DataFrame
+    purifier_dirs = sorted([
+        d for d in Path(args.purified_parent_dir).iterdir()
+        if d.is_dir()
+    ])
+
+    if not purifier_dirs:
+        raise RuntimeError(f"No subdirectories found in {args.purified_parent_dir}")
+
+    purifier_names = [d.name for d in purifier_dirs]
+    print(f"Found {len(purifier_names)} purifier(s): {', '.join(purifier_names)}")
+
+    # Results go in the run directory (parent of purified_parent_dir)
+    parent_dir = str(Path(args.purified_parent_dir).parent)
+
+    # ------------------------------------------------------------------
+    # Build DataFrame column schema
+    # ------------------------------------------------------------------
+
     nested_keys = ["pesq", "estoi"]
     pairs = ["og-vs-adv", "og-vs-prf", "adv-vs-prf"]
-    for key in nested_keys:
-        for pair in pairs:
-            data[f"{key}_{pair}"] = []
-    # SI-SDR / SIR / SAR
     si_metrics = ["si-sdr", "si-sir", "si-sar"]
-    for m in si_metrics:
-        data[m] = []
-    # WER
-    wers = ["wer_adv-vs-og", "wer_prf-vs-og"]
-    for w in wers:
-        data[w] = []
 
-    # Results will be saved to purified_dir's parent directory
-    parent_dir = join(args.purified_dir, "..")
+    # One set of audio-quality columns per purifier; adversarial columns
+    # only need to be stored once (og-vs-adv is the same regardless of purifier).
+    data = {"filename": []}
 
-    # Discover adversarial files (used as reference for filenames)
+    # Adversarial-only columns (computed once)
+    for key in nested_keys:
+        data[f"{key}_og-vs-adv"] = []
+    # SI metrics don't apply to adversarial-only comparison, keep per-purifier
+
+    # Per-purifier columns
+    for name in purifier_names:
+        for key in nested_keys:
+            for pair in ["og-vs-prf", "adv-vs-prf"]:
+                data[f"{key}_{pair}_{name}"] = []
+        for m in si_metrics:
+            data[f"{m}_{name}"] = []
+        data[f"wer_adv-vs-og"] = []  # stored once, added below
+        data[f"wer_prf-vs-og_{name}"] = []
+
+    # wer_adv-vs-og should only appear once in the schema — clean up the duplicate
+    # keys added in the loop above, keep a single column
+    data = {k: v for k, v in data.items() if not (k == "wer_adv-vs-og" and data["filename"] == [])}
+    data["wer_adv-vs-og"] = []
+
+    # ------------------------------------------------------------------
+    # Discover adversarial files (drive the loop)
+    # ------------------------------------------------------------------
+
     adversarial_files = sorted(glob(join(args.adversarial_dir, '*.wav')))
     adversarial_files += sorted(glob(join(args.adversarial_dir, '**', '*.wav')))
 
-    for adversarial_file in tqdm(adversarial_files):
+    for adversarial_file in tqdm(adversarial_files, desc="Audio metrics"):
         filename = str(Path(adversarial_file).relative_to(args.adversarial_dir))
-        if 'dB' in filename:
-            original_filename = filename.split("_")[0] + ".wav"
-        else:
-            original_filename = filename
+        original_filename = filename.split("_")[0] + ".wav" if 'dB' in filename else filename
 
-        # Load signals
+        # Load original and adversarial once
         x, sr_x = read(join(args.original_dir, original_filename))
         y, sr_y = read(join(args.adversarial_dir, filename))
-        x_hat, sr_x_hat = read(join(args.purified_dir, filename))
-        assert sr_x == sr_y == sr_x_hat, f"Sampling rates do not match for {filename}"
+        assert sr_x == sr_y, f"Sampling rate mismatch for {filename}"
 
-        # Compute metrics
-        metrics = compute_audio_metrics(x, y, x_hat, sr_x)
-
-        # Store results
         data["filename"].append(filename)
-        for key in nested_keys:
-            for pair in pairs:
-                data[f"{key}_{pair}"].append(metrics[key][pair])
-        for m in si_metrics:
-            data[m].append(metrics[m])
 
+        # Adversarial vs original PESQ/ESTOI (purifier-independent)
+        x_16k = librosa.resample(x, orig_sr=sr_x, target_sr=16000) if sr_x != 16000 else x
+        y_16k = librosa.resample(y, orig_sr=sr_y, target_sr=16000) if sr_y != 16000 else y
+        for key, fn in [("pesq", lambda a, b: pesq(16000, a, b, 'wb')),
+                        ("estoi", lambda a, b: stoi(x, y, sr_x, extended=True))]:
+            if key == "pesq":
+                data[f"{key}_og-vs-adv"].append(pesq(16000, x_16k, y_16k, 'wb'))
+            else:
+                data[f"{key}_og-vs-adv"].append(stoi(x, y, sr_x, extended=True))
 
-    # ======================================================
-    # Merge transcription JSONs + Compute WER
-    # ======================================================
+        # Per-purifier metrics
+        for name, pdir in zip(purifier_names, purifier_dirs):
+            purified_path = join(str(pdir), filename)
+            x_hat, sr_hat = read(purified_path)
+            assert sr_x == sr_hat, f"Sampling rate mismatch for purified {filename} ({name})"
 
-    # Find JSON files
+            metrics = compute_audio_metrics(x, y, x_hat, sr_x)
+
+            for key in nested_keys:
+                for pair in ["og-vs-prf", "adv-vs-prf"]:
+                    data[f"{key}_{pair}_{name}"].append(metrics[key][pair])
+            for m in si_metrics:
+                data[f"{m}_{name}"].append(metrics[m])
+
+    # ------------------------------------------------------------------
+    # Transcription JSONs + WER
+    # ------------------------------------------------------------------
+
     original_json_files = glob(join(args.original_dir, "*.json"))
     adversarial_json_files = glob(join(args.adversarial_dir, "*.json"))
-    purified_json_files = glob(join(args.purified_dir, "*.json"))
 
-    if len(original_json_files) != 1 or len(adversarial_json_files) != 1 or len(purified_json_files) != 1:
-        print("Expected exactly one transcription JSON file in each directory (original, adversarial, purified). Skipping WER computation.")
-        wer_adversarial_mean, wer_adversarial_std = float('nan'), float('nan')
-        wer_purified_mean, wer_purified_std = float('nan'), float('nan')
+    wer_adversarial_mean, wer_adversarial_std = float('nan'), float('nan')
+    wer_purified_stats = {name: (float('nan'), float('nan')) for name in purifier_names}
+
+    if len(original_json_files) != 1 or len(adversarial_json_files) != 1:
+        print("Expected exactly one transcription JSON in original and adversarial dirs. "
+              "Skipping WER computation.")
+        # Fill columns with NaN
+        n_files = len(data["filename"])
+        data["wer_adv-vs-og"] = [np.nan] * n_files
+        for name in purifier_names:
+            data[f"wer_prf-vs-og_{name}"] = [np.nan] * n_files
     else:
         print("Loading transcription JSONs...")
 
-        with open(original_json_files[0], "r") as f:
+        with open(original_json_files[0]) as f:
             original_data = json.load(f)
-        with open(adversarial_json_files[0], "r") as f:
+        with open(adversarial_json_files[0]) as f:
             adversarial_data = json.load(f)
-        with open(purified_json_files[0], "r") as f:
-            purified_data = json.load(f)
 
         original_dict = {basename(k): v for k, v in original_data.items()}
         adversarial_dict = {basename(k): v for k, v in adversarial_data.items()}
-        purified_dict = {basename(k): v for k, v in purified_data.items()}
 
-        merged = {}
+        # Load purifier JSONs (one per purifier)
+        purified_dicts = {}
+        for name, pdir in zip(purifier_names, purifier_dirs):
+            pjson = glob(join(str(pdir), "*.json"))
+            if len(pjson) != 1:
+                print(f"  Warning: expected 1 JSON in {pdir}, found {len(pjson)}. "
+                      f"Skipping WER for {name}.")
+                purified_dicts[name] = {}
+            else:
+                with open(pjson[0]) as f:
+                    purified_dicts[name] = {basename(k): v for k, v in json.load(f).items()}
+
         wer_adversarial = []
-        wer_purified = []
+        wer_purified_raw = {name: [] for name in purifier_names}
+        merged = {}
 
         for file_id, original_text in original_data.items():
-
             adversarial_text = adversarial_dict.get(file_id, "")
-            purified_text = purified_dict.get(file_id, "")
 
-            merged[file_id] = {
+            entry = {
                 "original": original_text,
                 "adversarial": adversarial_text,
-                "purified": purified_text
             }
+            for name in purifier_names:
+                entry[f"purified_{name}"] = purified_dicts[name].get(file_id, "")
+            merged[file_id] = entry
 
-            if original_text.strip() != "":
-
-                w = 1.0 if adversarial_text.strip() == "" else wer(original_text, adversarial_text)
-                wer_adversarial.append(w)
-                data["wer_adv-vs-og"].append(w)
-
-                w = 1.0 if purified_text.strip() != "" else wer(original_text, purified_text)
-                wer_purified.append(w)
-                data["wer_prf-vs-og"].append(w)
-            else:
+            if original_text.strip() == "":
                 data["wer_adv-vs-og"].append(np.nan)
-                data["wer_prf-vs-og"].append(np.nan)
+                for name in purifier_names:
+                    data[f"wer_prf-vs-og_{name}"].append(np.nan)
+                continue
 
+            # Adversarial WER
+            w = 1.0 if adversarial_text.strip() == "" else wer(original_text, adversarial_text)
+            wer_adversarial.append(w)
+            data["wer_adv-vs-og"].append(w)
 
-        # Save merged JSON in parent directory
+            # Per-purifier WER
+            for name in purifier_names:
+                purified_text = purified_dicts[name].get(file_id, "")
+                w = 1.0 if purified_text.strip() == "" else wer(original_text, purified_text)
+                wer_purified_raw[name].append(w)
+                data[f"wer_prf-vs-og_{name}"].append(w)
+
+        # Save merged JSON
         merged_path = join(parent_dir, "merged_transcriptions.json")
-
         with open(merged_path, "w") as f:
             json.dump(merged, f, indent=2)
-
         print(f"Merged transcription file saved to: {merged_path}")
 
-        # Compute mean/std
-        wer_adversarial_mean, wer_adversarial_std = mean_std(pd.Series(wer_adversarial).to_numpy())
-        wer_purified_mean, wer_purified_std = mean_std(pd.Series(wer_purified).to_numpy())
+        wer_adversarial_mean, wer_adversarial_std = mean_std(np.array(wer_adversarial))
+        for name in purifier_names:
+            wer_purified_stats[name] = mean_std(np.array(wer_purified_raw[name]))
 
-    # ======================================================
+    # ------------------------------------------------------------------
     # Print and save results
-    # ======================================================
+    # ------------------------------------------------------------------
 
-    # Create DataFrame
     df = pd.DataFrame(data)
 
-    # Print average ± std for each metric, nicely nested
     print("\n============ AVERAGE METRICS ============")
-    print("WER:")
-    print(f"  Adversarial vs Original: {wer_adversarial_mean:.3f} ± {wer_adversarial_std:.3f}")
-    print(f"  Purified vs Original: {wer_purified_mean:.3f} ± {wer_purified_std:.3f}")
+
+    print("\nWER:")
+    print(f"  Adversarial vs Original:           {wer_adversarial_mean:.3f} ± {wer_adversarial_std:.3f}")
+    for name in purifier_names:
+        mean_v, std_v = wer_purified_stats[name]
+        print(f"  Purified ({name}) vs Original:  {mean_v:.3f} ± {std_v:.3f}")
+
     for key in nested_keys:
         print(f"\n{key.upper()}:")
-        for pair in pairs:
-            mean_val, std_val = mean_std(df[f"{key}_{pair}"].to_numpy())
-            print(f"  {pair}: {mean_val:.3f} ± {std_val:.3f}")
+        col = f"{key}_og-vs-adv"
+        mean_v, std_v = mean_std(df[col].to_numpy())
+        print(f"  og-vs-adv:                         {mean_v:.3f} ± {std_v:.3f}")
+        for name in purifier_names:
+            for pair in ["og-vs-prf", "adv-vs-prf"]:
+                col = f"{key}_{pair}_{name}"
+                mean_v, std_v = mean_std(df[col].to_numpy())
+                label = f"{pair} ({name})"
+                print(f"  {label:<35} {mean_v:.3f} ± {std_v:.3f}")
+
     print("\nSI METRICS:")
     for m in si_metrics:
-        mean_val, std_val = mean_std(df[m].to_numpy())
-        print(f"  {m}: {mean_val:.3f} ± {std_val:.3f}")
+        for name in purifier_names:
+            col = f"{m}_{name}"
+            mean_v, std_v = mean_std(df[col].to_numpy())
+            print(f"  {m} ({name}):{' ' * (10 - len(m))} {mean_v:.3f} ± {std_v:.3f}")
     print()
 
-    # Save per-file results
-    df.to_csv(join(parent_dir, "results_per_file.csv"), index=False)
+    # Save per-file CSV
+    results_csv = join(parent_dir, "results_per_file.csv")
+    df.to_csv(results_csv, index=False)
+    print(f"Per-file results saved to: {results_csv}")
 
-    # Save averages to file
-    with open(join(parent_dir, "avg_results.txt"), "w") as f:
+    # Save averaged results
+    avg_path = join(parent_dir, "avg_results.txt")
+    with open(avg_path, "w") as f:
         f.write("WER:\n")
-        f.write(f"  Adversarial vs Original: {wer_adversarial_mean:.3f} ± {wer_adversarial_std:.3f}\n")
-        f.write(f"  Purified vs Original: {wer_purified_mean:.3f} ± {wer_purified_std:.3f}\n")
+        f.write(f"  Adversarial vs Original:           {wer_adversarial_mean:.3f} ± {wer_adversarial_std:.3f}\n")
+        for name in purifier_names:
+            mean_v, std_v = wer_purified_stats[name]
+            f.write(f"  Purified ({name}) vs Original:  {mean_v:.3f} ± {std_v:.3f}\n")
         for key in nested_keys:
             f.write(f"\n{key.upper()}:\n")
-            for pair in pairs:
-                mean_val, std_val = mean_std(df[f"{key}_{pair}"].to_numpy())
-                f.write(f"  {pair}: {mean_val:.3f} ± {std_val:.3f}\n")
+            col = f"{key}_og-vs-adv"
+            mean_v, std_v = mean_std(df[col].to_numpy())
+            f.write(f"  og-vs-adv:                         {mean_v:.3f} ± {std_v:.3f}\n")
+            for name in purifier_names:
+                for pair in ["og-vs-prf", "adv-vs-prf"]:
+                    col = f"{key}_{pair}_{name}"
+                    mean_v, std_v = mean_std(df[col].to_numpy())
+                    label = f"{pair} ({name})"
+                    f.write(f"  {label:<35} {mean_v:.3f} ± {std_v:.3f}\n")
         f.write("\nSI METRICS:\n")
         for m in si_metrics:
-            mean_val, std_val = mean_std(df[m].to_numpy())
-            f.write(f"  {m}: {mean_val:.3f} ± {std_val:.3f}\n")
+            for name in purifier_names:
+                col = f"{m}_{name}"
+                mean_v, std_v = mean_std(df[col].to_numpy())
+                f.write(f"  {m} ({name}):{' ' * (10 - len(m))} {mean_v:.3f} ± {std_v:.3f}\n")
+    print(f"Average results saved to: {avg_path}")
