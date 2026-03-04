@@ -13,4 +13,4 @@ srun singularity exec --nv --writable-tmpfs \
      /ceph/project/es26-ce8-avs-824/whispers-in-the-storm/extern/sgmse/pytorch_24.01.sif \
      /bin/bash -c "export TMPDIR=/scratch/singularity/tmp && \
                    source /scratch/sgmse_venv/bin/activate && \
-                   pip install -r requirements_version.txt --no-cache-dir"
+                   python -m pytorch_lightning.utilities.upgrade_checkpoint ckpts/sgmse+-train_vb_29nqe0uh_epoch=115.ckpt"

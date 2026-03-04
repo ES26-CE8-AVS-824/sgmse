@@ -1,18 +1,17 @@
-from os.path import join, basename
-from glob import glob
-from argparse import ArgumentParser
-from pathlib import Path
 import json
+from argparse import ArgumentParser
+from glob import glob
+from os.path import join, basename
+from pathlib import Path
 
-import numpy as np
-from soundfile import read
-from tqdm import tqdm
-import pandas as pd
 import librosa
-
+import numpy as np
+import pandas as pd
 from jiwer import wer
 from pesq import pesq
 from pystoi import stoi
+from soundfile import read
+from tqdm import tqdm
 
 from sgmse.util.other import energy_ratios, mean_std
 
@@ -238,62 +237,59 @@ if __name__ == '__main__':
 
     df = pd.DataFrame(data)
 
-    print("\n============ AVERAGE METRICS ============")
+    # Determine the longest label across all sections so numbers align globally
+    all_labels = (
+            ["Adversarial vs Original"]
+            + [f"Purified ({n}) vs Original" for n in purifier_names]
+            + ["og-vs-adv"]
+            + [f"{pair} ({n})" for n in purifier_names for pair in ["og-vs-prf", "adv-vs-prf"]]
+            + [f"{m} ({n})" for m in si_metrics for n in purifier_names]
+    )
+    W = max(len(l) for l in all_labels) + 4  # +4 for the leading "  " and a gap
 
-    print("\nWER:")
-    print(f"  Adversarial vs Original:           {wer_adversarial_mean:.3f} ± {wer_adversarial_std:.3f}")
+
+    def fmt(label, mean_v, std_v):
+        full = f"  {label}"
+        return f"{full:<{W}} {mean_v:.3f} ± {std_v:.3f}"
+
+
+    lines = ["\n============ AVERAGE METRICS ============"]
+
+    lines.append("\nWER:")
+    lines.append(fmt("Adversarial vs Original", wer_adversarial_mean, wer_adversarial_std))
     for name in purifier_names:
         mean_v, std_v = wer_purified_stats[name]
-        print(f"  Purified ({name}) vs Original:  {mean_v:.3f} ± {std_v:.3f}")
+        lines.append(fmt(f"Purified ({name}) vs Original", mean_v, std_v))
 
     for key in nested_keys:
-        print(f"\n{key.upper()}:")
+        lines.append(f"\n{key.upper()}:")
         col = f"{key}_og-vs-adv"
         mean_v, std_v = mean_std(df[col].to_numpy())
-        print(f"  og-vs-adv:                         {mean_v:.3f} ± {std_v:.3f}")
+        lines.append(fmt("og-vs-adv", mean_v, std_v))
         for name in purifier_names:
             for pair in ["og-vs-prf", "adv-vs-prf"]:
                 col = f"{key}_{pair}_{name}"
                 mean_v, std_v = mean_std(df[col].to_numpy())
-                label = f"{pair} ({name})"
-                print(f"  {label:<35} {mean_v:.3f} ± {std_v:.3f}")
+                lines.append(fmt(f"{pair} ({name})", mean_v, std_v))
 
-    print("\nSI METRICS:")
+    lines.append("\nSI METRICS:")
     for m in si_metrics:
         for name in purifier_names:
             col = f"{m}_{name}"
             mean_v, std_v = mean_std(df[col].to_numpy())
-            print(f"  {m} ({name}):{' ' * (10 - len(m))} {mean_v:.3f} ± {std_v:.3f}")
-    print()
+            lines.append(fmt(f"{m} ({name})", mean_v, std_v))
+    lines.append("")
+
+    output = "\n".join(lines)
+    print(output)
 
     # Save per-file CSV
     results_csv = join(parent_dir, "results_per_file.csv")
     df.to_csv(results_csv, index=False)
     print(f"Per-file results saved to: {results_csv}")
 
-    # Save averaged results
+    # Save averaged results — reuse the same formatted lines
     avg_path = join(parent_dir, "avg_results.txt")
     with open(avg_path, "w") as f:
-        f.write("WER:\n")
-        f.write(f"  Adversarial vs Original:           {wer_adversarial_mean:.3f} ± {wer_adversarial_std:.3f}\n")
-        for name in purifier_names:
-            mean_v, std_v = wer_purified_stats[name]
-            f.write(f"  Purified ({name}) vs Original:  {mean_v:.3f} ± {std_v:.3f}\n")
-        for key in nested_keys:
-            f.write(f"\n{key.upper()}:\n")
-            col = f"{key}_og-vs-adv"
-            mean_v, std_v = mean_std(df[col].to_numpy())
-            f.write(f"  og-vs-adv:                         {mean_v:.3f} ± {std_v:.3f}\n")
-            for name in purifier_names:
-                for pair in ["og-vs-prf", "adv-vs-prf"]:
-                    col = f"{key}_{pair}_{name}"
-                    mean_v, std_v = mean_std(df[col].to_numpy())
-                    label = f"{pair} ({name})"
-                    f.write(f"  {label:<35} {mean_v:.3f} ± {std_v:.3f}\n")
-        f.write("\nSI METRICS:\n")
-        for m in si_metrics:
-            for name in purifier_names:
-                col = f"{m}_{name}"
-                mean_v, std_v = mean_std(df[col].to_numpy())
-                f.write(f"  {m} ({name}):{' ' * (10 - len(m))} {mean_v:.3f} ± {std_v:.3f}\n")
+        f.write(output.strip() + "\n")
     print(f"Average results saved to: {avg_path}")

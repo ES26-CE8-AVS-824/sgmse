@@ -1,5 +1,7 @@
+ffmpeg
 h5py==3.10.0
 ipympl==0.9.3
+jiwer
 librosa==0.10.1
 ninja==1.11.1.1
 numpy==1.24.4
@@ -17,7 +19,9 @@ setuptools==44.0.0
 seaborn==0.13.2
 torch==2.2.0
 torch-ema==0.3
+torch-pesq
 torchaudio==2.2.0
+torchtext
 torchvision==0.17.0
 torchinfo==1.8.0
 torchsde==0.2.6
