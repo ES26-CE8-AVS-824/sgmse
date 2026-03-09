@@ -341,4 +341,4 @@ data/
 # AILAB venv
 sgmse_env/*
 sgmse_env_cu130/*
-sgmse_env_cu130.sif
+sgmse_env_cu130*.sif
