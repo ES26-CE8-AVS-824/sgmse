@@ -8,7 +8,7 @@ import librosa
 import numpy as np
 import pandas as pd
 from jiwer import wer
-from pesq import pesq
+from pesq import pesq, PesqError
 from pystoi import stoi
 from soundfile import read
 from tqdm import tqdm
@@ -24,9 +24,9 @@ def compute_audio_metrics(original, adversarial, purified, sr, compute_si=True):
 
     metrics = {
         "pesq": {
-            "raw-vs-adv": pesq(16000, original_16k, adversarial_16k, 'wb'),
-            "raw-vs-prf": pesq(16000, original_16k, purified_16k, 'wb'),
-            "adv-vs-prf": pesq(16000, adversarial_16k, purified_16k, 'wb'),
+            "raw-vs-adv": pesq(16000, original_16k, adversarial_16k, 'wb', on_error=PesqError.RETURN_VALUES),
+            "raw-vs-prf": pesq(16000, original_16k, purified_16k, 'wb', on_error=PesqError.RETURN_VALUES),
+            "adv-vs-prf": pesq(16000, adversarial_16k, purified_16k, 'wb', on_error=PesqError.RETURN_VALUES),
         },
         "estoi": {
             "raw-vs-adv": stoi(original, adversarial, sr, extended=True),
@@ -122,6 +122,9 @@ if __name__ == '__main__':
     for adversarial_file in tqdm(adversarial_files, desc="Audio metrics"):
         filename = str(Path(adversarial_file).relative_to(args.adversarial_dir))
         original_filename = filename.split("_")[0] + ".wav" if 'dB' in filename else filename
+        
+        original_filename = filename.replace("_adv", "_nat") if 'adv' in filename else original_filename
+        print(f"Processing: {filename} (original: {original_filename})")
 
         # Load original and adversarial once
         x, sr_x = read(join(args.original_dir, original_filename))
@@ -133,7 +136,7 @@ if __name__ == '__main__':
         # Raw vs adversarial PESQ/ESTOI (purifier-independent)
         x_16k = librosa.resample(x, orig_sr=sr_x, target_sr=16000) if sr_x != 16000 else x
         y_16k = librosa.resample(y, orig_sr=sr_y, target_sr=16000) if sr_y != 16000 else y
-        data["pesq_raw-vs-adv"].append(pesq(16000, x_16k, y_16k, 'wb'))
+        data["pesq_raw-vs-adv"].append(pesq(16000, x_16k, y_16k, 'wb', on_error=PesqError.RETURN_VALUES))
         data["estoi_raw-vs-adv"].append(stoi(x, y, sr_x, extended=True))
 
         # Per-purifier metrics
@@ -171,10 +174,16 @@ if __name__ == '__main__':
     missing = []
     if len(gt_json_files) != 1:
         missing.append(f"ground-truth dir ({gt_dir})")
+        print(f"Warning: expected exactly one transcription JSON in {gt_dir}, found {len(gt_json_files)}. "
+              f"WER vs ground truth will not be computed.")
     if len(original_json_files) != 1:
         missing.append(f"original dir ({args.original_dir})")
+        print(f"Warning: expected exactly one transcription JSON in {args.original_dir}, found {len(original_json_files)}. "
+              f"WER vs ground truth will not be computed.")
     if len(adversarial_json_files) != 1:
         missing.append(f"adversarial dir ({args.adversarial_dir})")
+        print(f"Warning: expected exactly one transcription JSON in {args.adversarial_dir}, found {len(adversarial_json_files)}. "
+              f"WER vs ground truth will not be computed.")
 
     if missing:
         print("Expected exactly one transcription JSON in each of: "
@@ -194,8 +203,8 @@ if __name__ == '__main__':
         with open(adversarial_json_files[0]) as f:
             adversarial_data = json.load(f)
 
-        original_dict = {basename(k): v for k, v in original_data.items()}
-        adversarial_dict = {basename(k): v for k, v in adversarial_data.items()}
+        original_dict = {basename(k.replace("_nat", "")): v for k, v in original_data.items()}
+        adversarial_dict = {basename(k.replace("_adv", "")): v for k, v in adversarial_data.items()}
 
         # Load purifier JSONs (one per purifier)
         purified_dicts = {}
@@ -207,7 +216,7 @@ if __name__ == '__main__':
                 purified_dicts[name] = {}
             else:
                 with open(pjson[0]) as f:
-                    purified_dicts[name] = {basename(k): v for k, v in json.load(f).items()}
+                    purified_dicts[name] = {basename(k.replace("_adv", "")): v for k, v in json.load(f).items()}
 
         wer_raw_list = []
         wer_adversarial = []
@@ -216,6 +225,7 @@ if __name__ == '__main__':
 
         # Iterate over ground-truth entries as the reference
         for file_id, gt_text in gt_data.items():
+            file_id = file_id.replace("_nat", "")
             raw_text = original_dict.get(file_id, "")
             adversarial_text = adversarial_dict.get(file_id, "")
 
