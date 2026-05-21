@@ -15,6 +15,8 @@ set_torch_cuda_arch_list()
 from sgmse.model import ScoreModel
 from sgmse.util.other import pad_spec
 
+import time
+
 
 if __name__ == '__main__':
     parser = ArgumentParser()
@@ -60,7 +62,10 @@ if __name__ == '__main__':
         pad_mode = "zero_pad"
 
     # Enhance files
+    timings = []
     for noisy_file in tqdm(noisy_files):
+        start_time = time.time()
+        
         filename = noisy_file.replace(args.test_dir, "")
         filename = filename[1:] if filename.startswith("/") else filename
 
@@ -104,6 +109,14 @@ if __name__ == '__main__':
         # Renormalize
         x_hat = x_hat * norm_factor
 
+        end_time = time.time()
+        timings.append(end_time - start_time)
         # Write enhanced wav file
         makedirs(dirname(join(args.enhanced_dir, filename)), exist_ok=True)
+
         write(join(args.enhanced_dir, filename), x_hat.cpu().numpy(), target_sr)
+
+    if timings:
+        avg_time = sum(timings) / len(timings)
+        with open(join(args.enhanced_dir, "timings.txt"), "w") as f:
+            f.write(f"Average processing time: {avg_time:.2f} seconds\n")
