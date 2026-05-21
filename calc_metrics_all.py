@@ -16,6 +16,17 @@ from tqdm import tqdm
 from sgmse.util.other import energy_ratios, mean_std
 
 
+def eval_frac_0_samples(hyps):
+    """Fraction of hypotheses that are empty strings."""
+    if not hyps:
+        return float('nan')
+    no_len_count = 0
+    for hyp in hyps:
+        if len(hyp) == 0:
+            no_len_count += 1
+    return no_len_count / len(hyps)
+
+
 def compute_audio_metrics(original, adversarial, purified, sr, compute_si=True):
     """Compute all metrics comparing original/adversarial/purified signals."""
     original_16k = librosa.resample(original, orig_sr=sr, target_sr=16000) if sr != 16000 else original
@@ -170,6 +181,8 @@ if __name__ == '__main__':
     wer_raw_mean, wer_raw_std = float('nan'), float('nan')
     wer_adversarial_mean, wer_adversarial_std = float('nan'), float('nan')
     wer_purified_stats = {name: (float('nan'), float('nan')) for name in purifier_names}
+    frac_zero_adversarial = float('nan')
+    frac_zero_purified = {name: float('nan') for name in purifier_names}
 
     missing = []
     if len(gt_json_files) != 1:
@@ -221,6 +234,8 @@ if __name__ == '__main__':
         wer_raw_list = []
         wer_adversarial = []
         wer_purified_raw = {name: [] for name in purifier_names}
+        adv_hyps = []
+        purified_hyps = {name: [] for name in purifier_names}
         merged = {}
 
         # Iterate over ground-truth entries as the reference
@@ -237,6 +252,10 @@ if __name__ == '__main__':
             for name in purifier_names:
                 entry[f"purified_{name}"] = purified_dicts[name].get(file_id, "")
             merged[file_id] = entry
+
+            adv_hyps.append(adversarial_text)
+            for name in purifier_names:
+                purified_hyps[name].append(purified_dicts[name].get(file_id, ""))
 
             if gt_text.strip() == "":
                 data["wer_raw-vs-gt"].append(np.nan)
@@ -273,6 +292,10 @@ if __name__ == '__main__':
         for name in purifier_names:
             wer_purified_stats[name] = mean_std(np.array(wer_purified_raw[name]))
 
+        frac_zero_adversarial = eval_frac_0_samples(adv_hyps)
+        for name in purifier_names:
+            frac_zero_purified[name] = eval_frac_0_samples(purified_hyps[name])
+
     # ------------------------------------------------------------------
     # Print and save results
     # ------------------------------------------------------------------
@@ -302,6 +325,11 @@ if __name__ == '__main__':
     for name in purifier_names:
         mean_v, std_v = wer_purified_stats[name]
         lines.append(fmt(f"def-vs-gt ({name})", mean_v, std_v))
+
+    lines.append("\nFrac0:")
+    lines.append(fmt("adv", frac_zero_adversarial, 0.0))
+    for name in purifier_names:
+        lines.append(fmt(f"def ({name})", frac_zero_purified[name], 0.0))
 
     for key in nested_keys:
         lines.append(f"\n{key.upper()}:")
