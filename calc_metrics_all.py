@@ -154,7 +154,8 @@ if __name__ == '__main__':
         for name, pdir in zip(purifier_names, purifier_dirs):
             purified_path = join(str(pdir), filename)
             x_hat, sr_hat = read(purified_path)
-            assert sr_x == sr_hat, f"Sampling rate mismatch for purified {filename} ({name})"
+            #assert sr_x == sr_hat, f"Sampling rate mismatch for purified {filename} ({name})"
+            x_hat = librosa.resample(x_hat, orig_sr=sr_hat, target_sr=sr_x) if sr_hat != sr_x else x_hat
 
             metrics = compute_audio_metrics(x, y, x_hat, sr_x,
                                             compute_si=args.report_si_metrics)
